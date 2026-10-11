@@ -102,7 +102,7 @@
       sdf(x, y, z, ph) {
         const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
         const qx = c * x - s * z, qz = s * x + c * z;
-        return sdBox(qx, y, qz, 0.62, 1.32, 0.11, 0.04);
+        return sdBox(qx, y, qz, 0.62, 1.32, 0.34, 0.3);
       },
       tex(x, y, z, ph) {
         const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
