@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Binary Spiral</title>
+<style>
+  :root { --bg: #050201; --fg: #ff7a1a; --dim: #5a2a0a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; color: var(--fg);
+  }
+  canvas {
+    display: block; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px);
+    image-rendering: pixelated; image-rendering: crisp-edges;
+  }
+  #ui {
+    position: fixed; left: 16px; bottom: 16px; display: flex; gap: 12px; flex-wrap: wrap;
+    align-items: center; color: var(--dim);
+  }
+  #ui select, #ui button {
+    font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--dim);
+    padding: 2px 6px; cursor: pointer;
+  }
+  #ui label { display: flex; gap: 4px; align-items: center; }
+  body.clean #ui { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <select id="shape">
+    <option value="ribbon">twisted ribbon</option>
+    <option value="helix">double helix</option>
+    <option value="torus">twisted torus</option>
+  </select>
+  <label><input type="checkbox" id="flow" checked> flowing bits</label>
+  <button id="pause">pause</button>
+</div>
+<script>
+/*
+ * Binary spiral: a ray-marched twisting shape rendered on a coarse character grid,
+ * where every cell is a 5x7 pixel-font "0" or "1" tinted by its lighting level.
+ *
+ * The animation is a function of loop phase t in [0, 1). Every shape has a 180°
+ * symmetry, so twisting by PI over one loop lands exactly back on frame 0, and the
+ * surface-locked bit texture uses coordinates that are invariant under that same
+ * symmetry. Bits flowing along the surface move a whole number of cells per loop.
+ * Result: render(0) === render(1), a seamless loop.
+ */
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.has('clean')) document.body.classList.add('clean');
+
+  // ---- grid & pixel font --------------------------------------------------
+  const COLS = 96, ROWS = 120;           // character grid
+  const CW = 6, CH = 8;                  // cell size in base pixels (5x7 glyph + 1px gap)
+  const W = COLS * CW, H = ROWS * CH;
+  const LOOP_SECONDS = 4;
+
+  const GLYPHS = {
+    0: ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
+    1: ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+  };
+  const glyphMask = {};
+  for (const k in GLYPHS) glyphMask[k] = GLYPHS[k].map(r => [...r].map(ch => ch === '#'));
+
+  // Orange ramp, darkest to brightest. Index 0 is used for background digits.
+  const PALETTE = [
+    [30, 11, 2], [110, 34, 0], [170, 56, 0], [224, 82, 0],
+    [255, 110, 10], [255, 140, 40], [255, 180, 100], [255, 226, 180],
+  ];
+  const BG = [5, 2, 1];
+
+  const canvas = document.getElementById('c');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  const px = img.data;
+
+  // ---- math helpers -------------------------------------------------------
+  const TAU = Math.PI * 2;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  function hash2(x, y) {
+    let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+  function sdBox(x, y, z, bx, by, bz, r) {
+    const qx = Math.abs(x) - bx + r, qy = Math.abs(y) - by + r, qz = Math.abs(z) - bz + r;
+    const ox = Math.max(qx, 0), oy = Math.max(qy, 0), oz = Math.max(qz, 0);
+    return Math.hypot(ox, oy, oz) + Math.min(Math.max(qx, qy, qz), 0) - r;
+  }
+
+  // ---- shapes -------------------------------------------------------------
+  // Each shape: sdf(x,y,z,phase) and tex(x,y,z,phase) -> [u, v] in "bit cell" units,
+  // where tex is invariant under the shape's PI-symmetry so the loop is seamless.
+  const SHAPES = {
+    ribbon: {
+      twist: 2.4, lip: 0.45,
+      sdf(x, y, z, ph) {
+        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
+        const qx = c * x - s * z, qz = s * x + c * z;
+        return sdBox(qx, y, qz, 0.62, 1.32, 0.11, 0.04);
+      },
+      tex(x, y, z, ph) {
+        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
+        const qx = c * x - s * z;
+        return [Math.abs(qx) * 22, y * 22];
+      },
+    },
+    helix: {
+      twist: 2.6, R: 0.46, r: 0.17, lip: 0.4,
+      sdf(x, y, z, ph) {
+        let d = Infinity;
+        for (let k = 0; k < 2; k++) {
+          const a = this.twist * y + ph + k * Math.PI;
+          d = Math.min(d, Math.hypot(x - this.R * Math.cos(a), z - this.R * Math.sin(a)) - this.r);
+        }
+        // rungs between the strands
+        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
+        const qx = c * x + s * z, qz = -s * x + c * z;
+        const ry = y - Math.round(y / 0.24) * 0.24;
+        d = Math.min(d, sdBox(qx, ry, qz, this.R, 0.035, 0.035, 0.02));
+        return Math.max(d, Math.abs(y) - 1.32);
+      },
+      tex(x, y, z, ph) {
+        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
+        // distance along/around the strand, same for both strands
+        const radial = c * x + s * z, tang = -s * x + c * z;
+        const ang = Math.atan2(tang, Math.abs(radial) - this.R);
+        return [Math.abs(ang) * 3.2, y * 22];
+      },
+    },
+    torus: {
+      Rm: 0.6, half: 0.2, turns: 1, lip: 0.4, tilt: 0.42,
+      frame(x, y, z) {
+        // tilt the ring towards the viewer a little
+        const c = Math.cos(this.tilt), s = Math.sin(this.tilt);
+        return [x, c * y - s * z, s * y + c * z];
+      },
+      local(x, y, z, ph) {
+        [x, y, z] = this.frame(x, y, z);
+        const phi = Math.atan2(y, x);
+        const rho = Math.hypot(x, y) - this.Rm;
+        const a = this.turns * phi + ph, c = Math.cos(a), s = Math.sin(a);
+        return [c * rho - s * z, s * rho + c * z, phi];
+      },
+      sdf(x, y, z, ph) {
+        const [u, v] = this.local(x, y, z, ph);
+        return sdBox(u, v, 0, this.half, this.half, 0, 0.05);
+      },
+      tex(x, y, z, ph) {
+        const [u, v, phi] = this.local(x, y, z, ph);
+        const face = Math.abs(u) > Math.abs(v) ? Math.abs(v) : Math.abs(u) + 1;
+        return [face * 18, phi * 14];
+      },
+    },
+  };
+
+  // ---- renderer -----------------------------------------------------------
+  const LIGHT = (() => { const l = [-0.55, 0.55, 0.65]; const n = Math.hypot(...l); return l.map(v => v / n); })();
+  const ASPECT = CW / CH;
+  const SCALE = 2.9 / ROWS;             // world units per row
+
+  function shade(shape, x, y, z, ph) {
+    const e = 0.004, f = (a, b, c) => shape.sdf(a, b, c, ph);
+    // tetrahedral normal
+    const k1 = f(x + e, y - e, z - e), k2 = f(x - e, y - e, z + e);
+    const k3 = f(x - e, y + e, z - e), k4 = f(x + e, y + e, z + e);
+    let nx = k1 - k2 - k3 + k4, ny = -k1 - k2 + k3 + k4, nz = -k1 + k2 - k3 + k4;
+    const n = Math.hypot(nx, ny, nz) || 1; nx /= n; ny /= n; nz /= n;
+    const diff = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+    // half-vector specular against an orthographic viewer at +z
+    const hx = LIGHT[0], hy = LIGHT[1], hz = LIGHT[2] + 1, hn = Math.hypot(hx, hy, hz);
+    const spec = Math.pow(Math.max(0, (nx * hx + ny * hy + nz * hz) / hn), 24);
+    const rim = Math.pow(1 - Math.abs(nz), 3) * 0.25;
+    return clamp(0.22 + 0.7 * diff + 0.55 * spec + rim, 0, 1);
+  }
+
+  function putGlyph(col, row, bit, rgb) {
+    const mask = glyphMask[bit];
+    const x0 = col * CW, y0 = row * CH;
+    for (let gy = 0; gy < CH; gy++) {
+      for (let gx = 0; gx < CW; gx++) {
+        const on = gy < 7 && gx < 5 && mask[gy][gx];
+        const c = on ? rgb : BG;
+        const i = ((y0 + gy) * W + x0 + gx) * 4;
+        px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2]; px[i + 3] = 255;
+      }
+    }
+  }
+
+  const state = { shape: params.get('shape') || 'ribbon', flow: params.get('flow') !== '0' };
+
+  function render(t) {
+    const shape = SHAPES[state.shape];
+    const ph = t * Math.PI;                       // PI-symmetric twist per loop
+    const flow = state.flow ? t * 12 : 0;         // whole bit-cells per loop -> seamless
+    for (let row = 0; row < ROWS; row++) {
+      const y = (ROWS / 2 - row - 0.5) * SCALE;
+      for (let col = 0; col < COLS; col++) {
+        const x = (col + 0.5 - COLS / 2) * SCALE * ASPECT;
+        // orthographic ray along -z
+        let z = 1.4, hit = false;
+        for (let i = 0; i < 90 && z > -1.4; i++) {
+          const d = shape.sdf(x, y, z, ph);
+          if (d < 0.003) { hit = true; break; }
+          z -= Math.max(d * shape.lip, 0.004);
+        }
+        if (hit) {
+          const lum = shade(shape, x, y, z, ph);
+          const [u, v] = shape.tex(x, y, z, ph);
+          const b = hash2(Math.floor(u), Math.floor(v - flow)) < 0.5 ? 0 : 1;
+          const level = 1 + Math.min(PALETTE.length - 2, Math.floor(lum * (PALETTE.length - 1)));
+          putGlyph(col, row, b, PALETTE[level]);
+        } else {
+          // faint static field of digits behind the shape
+          const r = hash2(col * 7 + 3, row * 13 + 1);
+          if (r < 0.22) putGlyph(col, row, r < 0.11 ? 0 : 1, PALETTE[0]);
+          else putGlyph(col, row, 0, BG);
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // ---- loop & ui ----------------------------------------------------------
+  let paused = false, start = performance.now(), pausedAt = 0;
+  function frame(now) {
+    if (!paused) render(((now - start) / 1000 / LOOP_SECONDS) % 1);
+    requestAnimationFrame(frame);
+  }
+
+  const sel = document.getElementById('shape'), flowBox = document.getElementById('flow');
+  sel.value = state.shape; flowBox.checked = state.flow;
+  sel.onchange = () => { state.shape = sel.value; if (paused) render(pausedAt); };
+  flowBox.onchange = () => { state.flow = flowBox.checked; if (paused) render(pausedAt); };
+  document.getElementById('pause').onclick = e => {
+    paused = !paused;
+    if (paused) pausedAt = ((performance.now() - start) / 1000 / LOOP_SECONDS) % 1;
+    else start = performance.now() - pausedAt * LOOP_SECONDS * 1000;
+    e.target.textContent = paused ? 'play' : 'pause';
+  };
+
+  // Exposed for frame export (see export.mjs).
+  window.binarySpiral = { render, state, LOOP_SECONDS, size: [W, H] };
+  if (!params.has('manual')) requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
