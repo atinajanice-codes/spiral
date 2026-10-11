@@ -3,51 +3,85 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Binary Spiral</title>
+<title>Binary DNA</title>
 <style>
-  :root { --bg: #050201; --fg: #ff7a1a; --dim: #5a2a0a; }
-  html, body { margin: 0; height: 100%; background: var(--bg); }
+  :root { --bg: #050201; --fg: #ff7a1a; --dim: #6e2200; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); }
   body {
-    display: flex; align-items: center; justify-content: center;
+    display: grid; grid-template-columns: 240px 1fr; gap: 16px;
+    min-height: 100vh; padding: 16px;
     font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; color: var(--fg);
   }
+  aside { align-self: end; display: flex; flex-direction: column; gap: 20px; }
+  main { display: flex; align-items: center; justify-content: center; min-width: 0; }
   canvas {
-    display: block; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px);
+    display: block; max-width: 100%; max-height: calc(100vh - 32px);
     image-rendering: pixelated; image-rendering: crisp-edges;
   }
-  #ui {
-    position: fixed; left: 16px; bottom: 16px; display: flex; gap: 12px; flex-wrap: wrap;
-    align-items: center; color: var(--dim);
+
+  .panel { border: 1px solid var(--dim); padding: 14px; display: flex; flex-direction: column; gap: 16px; }
+  .group { display: flex; flex-direction: column; gap: 8px; }
+  .label { display: flex; justify-content: space-between; color: var(--fg); text-transform: lowercase; }
+  .label output { color: var(--dim); }
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatch {
+    width: 24px; height: 24px; padding: 0; cursor: pointer;
+    border: 1px solid var(--dim); background: var(--c); outline-offset: 2px;
   }
-  #ui select, #ui button {
-    font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--dim);
-    padding: 2px 6px; cursor: pointer;
+  .swatch[aria-pressed="true"] { outline: 2px solid var(--fg); }
+  input[type=range] { width: 100%; margin: 0; accent-color: var(--fg); cursor: pointer; }
+  .ends { display: flex; justify-content: space-between; color: var(--dim); }
+
+  .title h1 { margin: 0; font-size: 28px; line-height: 1.1; font-weight: 700; letter-spacing: -0.01em; }
+  .title p { margin: 4px 0 0; color: var(--dim); font-size: 14px; }
+
+  body.clean { display: flex; align-items: center; justify-content: center; }
+  body.clean aside { display: none; }
+
+  @media (max-width: 720px) {
+    body { grid-template-columns: 1fr; }
+    main { order: -1; }
+    canvas { max-height: 70vh; }
+    aside { align-self: start; }
   }
-  #ui label { display: flex; gap: 4px; align-items: center; }
-  body.clean #ui { display: none; }
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
-<div id="ui">
-  <select id="shape">
-    <option value="ribbon">twisted ribbon</option>
-    <option value="helix">double helix</option>
-    <option value="torus">twisted torus</option>
-  </select>
-  <label><input type="checkbox" id="flow" checked> flowing bits</label>
-  <button id="pause">pause</button>
-</div>
+<aside>
+  <div class="panel">
+    <div class="group">
+      <span class="label">Color <output id="colorOut"></output></span>
+      <div class="swatches" id="swatches" role="group" aria-label="Color"></div>
+    </div>
+    <div class="group">
+      <label class="label" for="strands">Strands <output id="strandsOut"></output></label>
+      <input type="range" id="strands" min="2" max="6" step="1" value="2">
+      <div class="ends"><span>2</span><span>6</span></div>
+    </div>
+    <div class="group">
+      <label class="label" for="width">Width <output id="widthOut"></output></label>
+      <input type="range" id="width" min="0" max="1" step="0.01" value="0.5">
+      <div class="ends"><span>skinny</span><span>fat</span></div>
+    </div>
+  </div>
+  <div class="title">
+    <h1>Binary DNA</h1>
+    <p id="subtitle">Two-strand orange</p>
+  </div>
+</aside>
+<main><canvas id="c" aria-label="Animated twisting strands made of zeros and ones"></canvas></main>
 <script>
 /*
- * Binary spiral: a ray-marched twisting shape rendered on a coarse character grid,
- * where every cell is a 5x7 pixel-font "0" or "1" tinted by its lighting level.
+ * Binary DNA: N rounded strands twisting around a vertical axis, ray-marched on a
+ * coarse character grid where every cell is a 5x7 pixel-font "0" or "1" tinted by
+ * its lighting level.
  *
- * The animation is a function of loop phase t in [0, 1). Every shape has a 180°
- * symmetry, so twisting by PI over one loop lands exactly back on frame 0, and the
- * surface-locked bit texture uses coordinates that are invariant under that same
- * symmetry. Bits flowing along the surface move a whole number of cells per loop.
- * Result: render(0) === render(1), a seamless loop.
+ * The animation is a function of loop phase t in [0, 1). N strands are symmetric
+ * under a 2π/N turn, so twisting by a whole number of those turns per loop lands
+ * exactly back on frame 0. The bit texture is pinned to each strand's own local
+ * frame (identical for every strand), and flowing bits move exactly one period of
+ * the bit pattern per loop. Result: render(0) === render(1), a seamless loop.
  */
 (() => {
   const params = new URLSearchParams(location.search);
@@ -58,6 +92,7 @@
   const CW = 6, CH = 8;                  // cell size in base pixels (5x7 glyph + 1px gap)
   const W = COLS * CW, H = ROWS * CH;
   const LOOP_SECONDS = 4;
+  const FLOW_PERIOD = 24;                // bit pattern repeats this many cells along a strand
 
   const GLYPHS = {
     0: ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
@@ -66,12 +101,27 @@
   const glyphMask = {};
   for (const k in GLYPHS) glyphMask[k] = GLYPHS[k].map(r => [...r].map(ch => ch === '#'));
 
-  // Orange ramp, darkest to brightest. Index 0 is used for background digits.
-  const PALETTE = [
-    [30, 11, 2], [110, 34, 0], [170, 56, 0], [224, 82, 0],
-    [255, 110, 10], [255, 140, 40], [255, 180, 100], [255, 226, 180],
-  ];
-  const BG = [5, 2, 1];
+  // ---- colors -------------------------------------------------------------
+  // 8-step ramps, darkest to brightest. Index 0 is used for background digits.
+  function hsl(h, s, l) {
+    s /= 100; l /= 100;
+    const f = n => { const k = (n + h / 30) % 12; return l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+    return [f(0), f(8), f(4)].map(v => Math.round(v * 255));
+  }
+  const RAMP_L = [6, 21, 32, 42, 50, 58, 70, 85];
+  const ramp = (h, s = 100) => RAMP_L.map((l, i) => hsl(h, i === 7 ? 100 : s, l));
+  const COLORS = {
+    purple: { ramp: ramp(274, 90), bg: hsl(274, 60, 1.4) },
+    red:    { ramp: ramp(2, 95),   bg: hsl(2, 60, 1.4) },
+    yellow: { ramp: ramp(46),      bg: hsl(46, 60, 1.2) },
+    orange: {
+      ramp: [[30, 11, 2], [110, 34, 0], [170, 56, 0], [224, 82, 0],
+             [255, 110, 10], [255, 140, 40], [255, 180, 100], [255, 226, 180]],
+      bg: [5, 2, 1],
+    },
+    pink:   { ramp: ramp(326, 95), bg: hsl(326, 60, 1.4) },
+    blue:   { ramp: ramp(214),     bg: hsl(214, 60, 1.4) },
+  };
 
   const canvas = document.getElementById('c');
   canvas.width = W; canvas.height = H;
@@ -87,75 +137,58 @@
     h = Math.imul(h ^ (h >>> 13), 1274126177);
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
   }
-  function sdBox(x, y, z, bx, by, bz, r) {
-    const qx = Math.abs(x) - bx + r, qy = Math.abs(y) - by + r, qz = Math.abs(z) - bz + r;
-    const ox = Math.max(qx, 0), oy = Math.max(qy, 0), oz = Math.max(qz, 0);
-    return Math.hypot(ox, oy, oz) + Math.min(Math.max(qx, qy, qz), 0) - r;
+  // polynomial smooth minimum: merges strands with a soft groove between them
+  function smin(a, b, k) {
+    const h = Math.max(k - Math.abs(a - b), 0) / k;
+    return Math.min(a, b) - h * h * k * 0.25;
   }
 
-  // ---- shapes -------------------------------------------------------------
-  // Each shape: sdf(x,y,z,phase) and tex(x,y,z,phase) -> [u, v] in "bit cell" units,
-  // where tex is invariant under the shape's PI-symmetry so the loop is seamless.
-  const SHAPES = {
-    ribbon: {
-      twist: 2.4, lip: 0.45,
-      sdf(x, y, z, ph) {
-        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
-        const qx = c * x - s * z, qz = s * x + c * z;
-        return sdBox(qx, y, qz, 0.62, 1.32, 0.34, 0.3);
-      },
-      tex(x, y, z, ph) {
-        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
-        const qx = c * x - s * z;
-        return [Math.abs(qx) * 22, y * 22];
-      },
+  // ---- strands ------------------------------------------------------------
+  // n round tubes of radius r whose centers sit at radius R from the axis and
+  // twist with height. Width w in [0, 1] sets both the overall size and how far
+  // apart neighbouring strands sit: skinny strands overlap into one grooved rope,
+  // fat strands pull apart until small gaps open between them.
+  const strands = {
+    twist: 2.4, ymax: 1.32,
+    c: new Float64Array(12),
+    setup(n, w) {
+      const outer = 0.32 + 0.5 * w;             // R + r: half-width of the bundle
+      const spread = 0.55 + 0.8 * w;            // neighbour spacing / tube diameter
+      const s = Math.sin(Math.PI / n);
+      this.n = n;
+      this.r = outer / (1 + spread / s);
+      this.R = spread * this.r / s;
+      this.k = 0.3 * this.r;
+      this.extent = outer + 0.02;
     },
-    helix: {
-      twist: 2.6, R: 0.46, r: 0.17, lip: 0.4,
-      sdf(x, y, z, ph) {
-        let d = Infinity;
-        for (let k = 0; k < 2; k++) {
-          const a = this.twist * y + ph + k * Math.PI;
-          d = Math.min(d, Math.hypot(x - this.R * Math.cos(a), z - this.R * Math.sin(a)) - this.r);
-        }
-        // rungs between the strands
-        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
-        const qx = c * x + s * z, qz = -s * x + c * z;
-        const ry = y - Math.round(y / 0.24) * 0.24;
-        d = Math.min(d, sdBox(qx, ry, qz, this.R, 0.035, 0.035, 0.02));
-        return Math.max(d, Math.abs(y) - 1.32);
-      },
-      tex(x, y, z, ph) {
-        const a = this.twist * y + ph, c = Math.cos(a), s = Math.sin(a);
-        // distance along/around the strand, same for both strands
-        const radial = c * x + s * z, tang = -s * x + c * z;
-        const ang = Math.atan2(tang, Math.abs(radial) - this.R);
-        return [Math.abs(ang) * 3.2, y * 22];
-      },
+    centers(y, ph) {
+      const c = this.c;
+      for (let i = 0; i < this.n; i++) {
+        const a = this.twist * y + ph + i * TAU / this.n;
+        c[2 * i] = this.R * Math.cos(a); c[2 * i + 1] = this.R * Math.sin(a);
+      }
+      return c;
     },
-    torus: {
-      Rm: 0.6, half: 0.2, turns: 1, lip: 0.4, tilt: 0.42,
-      frame(x, y, z) {
-        // tilt the ring towards the viewer a little
-        const c = Math.cos(this.tilt), s = Math.sin(this.tilt);
-        return [x, c * y - s * z, s * y + c * z];
-      },
-      local(x, y, z, ph) {
-        [x, y, z] = this.frame(x, y, z);
-        const phi = Math.atan2(y, x);
-        const rho = Math.hypot(x, y) - this.Rm;
-        const a = this.turns * phi + ph, c = Math.cos(a), s = Math.sin(a);
-        return [c * rho - s * z, s * rho + c * z, phi];
-      },
-      sdf(x, y, z, ph) {
-        const [u, v] = this.local(x, y, z, ph);
-        return sdBox(u, v, 0, this.half, this.half, 0, 0.05);
-      },
-      tex(x, y, z, ph) {
-        const [u, v, phi] = this.local(x, y, z, ph);
-        const face = Math.abs(u) > Math.abs(v) ? Math.abs(v) : Math.abs(u) + 1;
-        return [face * 18, phi * 14];
-      },
+    // distance within a horizontal slice; rays run along -z so y stays fixed
+    slice(x, z, c) {
+      let d = Infinity;
+      for (let i = 0; i < this.n; i++) d = smin(d, Math.hypot(x - c[2 * i], z - c[2 * i + 1]) - this.r, this.k);
+      return d;
+    },
+    sdf(x, y, z, ph) {
+      return Math.max(this.slice(x, z, this.centers(y, ph)), Math.abs(y) - this.ymax);
+    },
+    // texture coords in the nearest strand's own frame, so all strands match
+    tex(x, y, z, ph) {
+      const c = this.centers(y, ph);
+      let best = 0, bd = Infinity;
+      for (let i = 0; i < this.n; i++) {
+        const d = Math.hypot(x - c[2 * i], z - c[2 * i + 1]);
+        if (d < bd) { bd = d; best = i; }
+      }
+      const a = this.twist * y + ph + best * TAU / this.n, cs = Math.cos(a), sn = Math.sin(a);
+      const radial = cs * x + sn * z - this.R, tang = -sn * x + cs * z;
+      return [Math.atan2(tang, radial) * this.r * 22, y * 22];
     },
   };
 
@@ -179,6 +212,7 @@
     return clamp(0.22 + 0.7 * diff + 0.55 * spec + rim, 0, 1);
   }
 
+  let BG = COLORS.orange.bg;
   function putGlyph(col, row, bit, rgb) {
     const mask = glyphMask[bit];
     const x0 = col * CW, y0 = row * CH;
@@ -192,33 +226,47 @@
     }
   }
 
-  const state = { shape: params.get('shape') || 'ribbon', flow: params.get('flow') !== '0' };
+  const state = {
+    color: COLORS[params.get('color')] ? params.get('color') : 'orange',
+    strands: clamp(parseInt(params.get('strands'), 10) || 2, 2, 6),
+    width: clamp(params.has('width') ? parseFloat(params.get('width')) || 0 : 0.5, 0, 1),
+    flow: params.get('flow') !== '0',
+  };
 
   function render(t) {
-    const shape = SHAPES[state.shape];
-    const ph = t * Math.PI;                       // PI-symmetric twist per loop
-    const flow = state.flow ? t * 12 : 0;         // whole bit-cells per loop -> seamless
+    const shape = strands;
+    shape.setup(state.strands, state.width);
+    const palette = COLORS[state.color].ramp;
+    BG = COLORS[state.color].bg;
+    // whole number of 2π/n symmetry turns per loop (about half a turn) -> seamless
+    const ph = t * TAU * Math.round(state.strands / 2) / state.strands;
+    const flow = state.flow ? t * FLOW_PERIOD : 0;   // one pattern period per loop -> seamless
     for (let row = 0; row < ROWS; row++) {
       const y = (ROWS / 2 - row - 0.5) * SCALE;
+      const inside = Math.abs(y) <= shape.ymax;
+      const c = shape.centers(y, ph);
       for (let col = 0; col < COLS; col++) {
         const x = (col + 0.5 - COLS / 2) * SCALE * ASPECT;
-        // orthographic ray along -z
-        let z = 1.4, hit = false;
-        for (let i = 0; i < 90 && z > -1.4; i++) {
-          const d = shape.sdf(x, y, z, ph);
-          if (d < 0.003) { hit = true; break; }
-          z -= Math.max(d * shape.lip, 0.004);
+        // orthographic ray along -z through the slice at this row's height
+        let z = shape.extent, hit = false;
+        if (inside && Math.abs(x) < shape.extent) {
+          for (let i = 0; i < 60 && z > -shape.extent; i++) {
+            const d = shape.slice(x, z, c);
+            if (d < 0.002) { hit = true; break; }
+            z -= Math.max(d * 0.9, 0.003);
+          }
         }
         if (hit) {
           const lum = shade(shape, x, y, z, ph);
           const [u, v] = shape.tex(x, y, z, ph);
-          const b = hash2(Math.floor(u), Math.floor(v - flow)) < 0.5 ? 0 : 1;
-          const level = 1 + Math.min(PALETTE.length - 2, Math.floor(lum * (PALETTE.length - 1)));
-          putGlyph(col, row, b, PALETTE[level]);
+          const cell = ((Math.floor(v - flow) % FLOW_PERIOD) + FLOW_PERIOD) % FLOW_PERIOD;
+          const b = hash2(Math.floor(u), cell) < 0.5 ? 0 : 1;
+          const level = 1 + Math.min(palette.length - 2, Math.floor(lum * (palette.length - 1)));
+          putGlyph(col, row, b, palette[level]);
         } else {
           // faint static field of digits behind the shape
           const r = hash2(col * 7 + 3, row * 13 + 1);
-          if (r < 0.22) putGlyph(col, row, r < 0.11 ? 0 : 1, PALETTE[0]);
+          if (r < 0.22) putGlyph(col, row, r < 0.11 ? 0 : 1, palette[0]);
           else putGlyph(col, row, 0, BG);
         }
       }
@@ -226,23 +274,61 @@
     ctx.putImageData(img, 0, 0);
   }
 
-  // ---- loop & ui ----------------------------------------------------------
+  // ---- loop ---------------------------------------------------------------
   let paused = false, start = performance.now(), pausedAt = 0;
-  function frame(now) {
-    if (!paused) render(((now - start) / 1000 / LOOP_SECONDS) % 1);
+  const phase = () => ((performance.now() - start) / 1000 / LOOP_SECONDS) % 1;
+  function frame() {
+    if (!paused) render(phase());
     requestAnimationFrame(frame);
   }
-
-  const sel = document.getElementById('shape'), flowBox = document.getElementById('flow');
-  sel.value = state.shape; flowBox.checked = state.flow;
-  sel.onchange = () => { state.shape = sel.value; if (paused) render(pausedAt); };
-  flowBox.onchange = () => { state.flow = flowBox.checked; if (paused) render(pausedAt); };
-  document.getElementById('pause').onclick = e => {
+  // space toggles pause
+  addEventListener('keydown', e => {
+    if (e.code !== 'Space' || e.target.closest('button, input')) return;
+    e.preventDefault();
     paused = !paused;
-    if (paused) pausedAt = ((performance.now() - start) / 1000 / LOOP_SECONDS) % 1;
+    if (paused) pausedAt = phase();
     else start = performance.now() - pausedAt * LOOP_SECONDS * 1000;
-    e.target.textContent = paused ? 'play' : 'pause';
-  };
+  });
+
+  // ---- controls -----------------------------------------------------------
+  const NUMBERS = ['', '', 'Two', 'Three', 'Four', 'Five', 'Six'];
+  const $ = id => document.getElementById(id);
+  const swatches = $('swatches'), strandsIn = $('strands'), widthIn = $('width');
+
+  for (const name of Object.keys(COLORS)) {
+    const b = document.createElement('button');
+    const [r, g, bl] = COLORS[name].ramp[5];
+    b.className = 'swatch'; b.type = 'button'; b.dataset.color = name;
+    b.title = name; b.setAttribute('aria-label', name);
+    b.style.setProperty('--c', `rgb(${r} ${g} ${bl})`);
+    b.onclick = () => { state.color = name; sync(); };
+    swatches.append(b);
+  }
+  strandsIn.oninput = () => { state.strands = +strandsIn.value; sync(); };
+  widthIn.oninput = () => { state.width = +widthIn.value; sync(); };
+
+  function sync() {
+    const { ramp, bg } = COLORS[state.color];
+    const css = c => `rgb(${c[0]} ${c[1]} ${c[2]})`;
+    const root = document.documentElement.style;
+    root.setProperty('--fg', css(ramp[5]));
+    root.setProperty('--dim', css(ramp[2]));
+    root.setProperty('--bg', css(bg));
+    for (const b of swatches.children) b.setAttribute('aria-pressed', b.dataset.color === state.color);
+    strandsIn.value = state.strands; widthIn.value = state.width;
+    $('colorOut').textContent = state.color;
+    $('strandsOut').textContent = state.strands;
+    $('widthOut').textContent = Math.round(state.width * 100) + '%';
+    $('subtitle').textContent = `${NUMBERS[state.strands]}-strand ${state.color}`;
+    // keep the URL shareable
+    try {
+      const q = new URLSearchParams(location.search);
+      q.set('color', state.color); q.set('strands', state.strands); q.set('width', state.width);
+      history.replaceState(null, '', '?' + q);
+    } catch (e) { /* file:// may refuse; the controls still work */ }
+    if (paused) render(pausedAt);
+  }
+  sync();
 
   // Exposed for frame export (see export.mjs).
   window.binarySpiral = { render, state, LOOP_SECONDS, size: [W, H] };
