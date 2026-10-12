@@ -120,14 +120,18 @@
   const COLS = 144;                      // character grid
   const CW = 6, CH = 8;                  // cell size in base pixels (5x7 glyph + 1px gap)
   // 120 rows, except on a phone where the grid grows taller to fill the narrow column
-  let ROWS = 120;
+  // so the strands run the full height of the window; refitted on every resize
+  let ROWS = 120, H = ROWS * CH;
   const mainEl = document.querySelector('main');
-  if (!params.has('clean') && !params.has('manual') && matchMedia('(max-width: 720px)').matches && mainEl.clientWidth > 0) {
+  const phone = matchMedia('(max-width: 720px)');
+  const fixedGrid = params.has('clean') || params.has('manual');
+  function fitRows() {
+    if (fixedGrid || !phone.matches || !mainEl.clientWidth) return 120;
     const fit = COLS * CW / CH * mainEl.clientHeight / mainEl.clientWidth;
-    ROWS = 2 * Math.round(Math.max(120, Math.min(240, fit)) / 2);
+    return 2 * Math.round(Math.max(120, Math.min(420, fit)) / 2);
   }
   const SCALE = 2.9 / 120;               // world units per row
-  const W = COLS * CW, H = ROWS * CH;
+  const W = COLS * CW;
   const LOOP_SECONDS = 4;
   const FLOW_PERIOD = 24;                // bit pattern repeats this many cells along a strand
   const PULL_REACH = 14;                 // background digits this many cells from a strand get pulled in
@@ -166,10 +170,8 @@
   };
 
   const canvas = document.getElementById('c');
-  canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(W, H);
-  const px = img.data;
+  let img, px;
 
   // ---- math helpers -------------------------------------------------------
   const TAU = Math.PI * 2;
@@ -237,6 +239,18 @@
   };
 
   // ---- renderer -----------------------------------------------------------
+  // (Re)sizes the grid, canvas and strand length; true if the size changed.
+  function resize() {
+    const rows = fitRows();
+    if (img && rows === ROWS) return false;
+    ROWS = rows; H = ROWS * CH;
+    canvas.width = W; canvas.height = H;
+    img = ctx.createImageData(W, H); px = img.data;
+    strands.ymax = ROWS * SCALE / 2 - 0.13;
+    return true;
+  }
+  resize();
+
   const LIGHT = (() => { const l = [-0.55, 0.55, 0.65]; const n = Math.hypot(...l); return l.map(v => v / n); })();
   const ASPECT = CW / CH;
   const UNIT = SCALE / CH;              // world units per base pixel
@@ -453,6 +467,7 @@
 
   // ---- loop ---------------------------------------------------------------
   let paused = false, start = performance.now(), pausedAt = 0;
+  addEventListener('resize', () => { if (resize() && paused) render(pausedAt); });
   const phase = () => ((performance.now() - start) / 1000 / LOOP_SECONDS) % 1;
   let last = performance.now();
   function frame(now) {
@@ -556,7 +571,7 @@
   if (!params.has('manual') && !params.has('clean')) setInterval(type, 28);
 
   // Exposed for frame export (see export.mjs).
-  window.binarySpiral = { render, state, LOOP_SECONDS, size: [W, H] };
+  window.binarySpiral = { render, state, LOOP_SECONDS, get size() { return [W, H]; } };
   if (!params.has('manual')) requestAnimationFrame(frame);
 })();
 </script>
