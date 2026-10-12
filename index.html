@@ -5,7 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Binary DNA</title>
 <style>
-  :root { --bg: #050201; --fg: #ff7a1a; --dim: #6e2200; color-scheme: dark; }
+  /* interface stays white whatever strand color is picked; only --bg follows it */
+  :root {
+    --bg: #050201; --fg: #fff; --dim: rgb(255 255 255 / 0.6); --line: rgb(255 255 255 / 0.24);
+    color-scheme: dark;
+  }
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; background: var(--bg); }
   body {
@@ -13,21 +17,32 @@
     min-height: 100vh; padding: 16px;
     font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; color: var(--fg);
   }
-  aside { align-self: end; display: flex; flex-direction: column; gap: 20px; }
+  aside { display: flex; flex-direction: column; gap: 20px; min-height: 0; }
   main { display: flex; align-items: center; justify-content: center; min-width: 0; }
   canvas {
     display: block; max-width: 100%; max-height: calc(100vh - 32px);
     image-rendering: pixelated; image-rendering: crisp-edges;
+    cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none;
   }
 
-  .panel { border: 1px solid var(--dim); padding: 14px; display: flex; flex-direction: column; gap: 16px; }
+  .panel { border: 1px solid var(--line); padding: 14px; display: flex; flex-direction: column; gap: 16px; }
+  /* live readout of the render loop; fills the space above the controls */
+  .trace { flex: 1; min-height: 96px; position: relative; overflow: hidden; }
+  .trace pre {
+    position: absolute; left: 14px; right: 14px; bottom: 14px; margin: 0;
+    font: inherit; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .trace::before {
+    content: ''; position: absolute; inset: 0 0 auto; height: 40%; z-index: 1;
+    background: linear-gradient(var(--bg), transparent); pointer-events: none;
+  }
   .group { display: flex; flex-direction: column; gap: 8px; }
   .label { display: flex; justify-content: space-between; color: var(--fg); text-transform: lowercase; }
   .label output { color: var(--dim); }
   .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
   .swatch {
     width: 24px; height: 24px; padding: 0; cursor: pointer;
-    border: 1px solid var(--dim); background: var(--c); outline-offset: 2px;
+    border: 1px solid var(--line); background: var(--c); outline-offset: 2px;
   }
   .swatch[aria-pressed="true"] { outline: 2px solid var(--fg); }
   input[type=range] { width: 100%; margin: 0; accent-color: var(--fg); cursor: pointer; }
@@ -39,16 +54,30 @@
   body.clean { display: flex; align-items: center; justify-content: center; }
   body.clean aside { display: none; }
 
+  /* phones: one screen, no scrolling; readout and controls left, strands right */
   @media (max-width: 720px) {
-    body { grid-template-columns: 1fr; }
-    main { order: -1; }
-    canvas { max-height: 70vh; }
-    aside { align-self: start; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 8px; padding: 8px;
+      height: 100vh; height: 100dvh; min-height: 0; font-size: 10px;
+    }
+    main { min-height: 0; }
+    canvas { max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); }
+    aside { gap: 8px; }
+    .panel { padding: 8px; gap: 10px; }
+    .group { gap: 5px; }
+    .trace { min-height: 40px; }
+    .trace pre { left: 8px; right: 8px; bottom: 8px; }
+    .swatches { gap: 6px; }
+    .swatch { width: 18px; height: 18px; }
+    .title h1 { font-size: 18px; }
+    .title p { margin-top: 2px; font-size: 11px; }
   }
 </style>
 </head>
 <body>
 <aside>
+  <div class="panel trace" aria-hidden="true"><pre id="trace"></pre></div>
   <div class="panel">
     <div class="group">
       <span class="label">Color <output id="colorOut"></output></span>
@@ -62,7 +91,7 @@
     <div class="group">
       <label class="label" for="width">Width <output id="widthOut"></output></label>
       <input type="range" id="width" min="0" max="1" step="0.01" value="0.5">
-      <div class="ends"><span>skinny</span><span>fat</span></div>
+      <div class="ends"><span>slim</span><span>broad</span></div>
     </div>
   </div>
   <div class="title">
@@ -88,11 +117,24 @@
   if (params.has('clean')) document.body.classList.add('clean');
 
   // ---- grid & pixel font --------------------------------------------------
-  const COLS = 96, ROWS = 120;           // character grid
+  const COLS = 144;                      // character grid
   const CW = 6, CH = 8;                  // cell size in base pixels (5x7 glyph + 1px gap)
+  // 120 rows, except on a phone where the grid grows taller to fill the narrow column
+  let ROWS = 120;
+  const mainEl = document.querySelector('main');
+  if (!params.has('clean') && !params.has('manual') && matchMedia('(max-width: 720px)').matches && mainEl.clientWidth > 0) {
+    const fit = COLS * CW / CH * mainEl.clientHeight / mainEl.clientWidth;
+    ROWS = 2 * Math.round(Math.max(120, Math.min(240, fit)) / 2);
+  }
+  const SCALE = 2.9 / 120;               // world units per row
   const W = COLS * CW, H = ROWS * CH;
   const LOOP_SECONDS = 4;
   const FLOW_PERIOD = 24;                // bit pattern repeats this many cells along a strand
+  const PULL_REACH = 14;                 // background digits this many cells from a strand get pulled in
+  const PULL_SLOTS = 3, PULL_RATE = 3;   // digits per lane within reach / per loop (whole number -> seamless)
+  const HOVER_REACH = 80;                // base pixels around the cursor that scatter on hover
+  const HOLE_MIN = 18, HOLE_MAX = 190;   // black hole radius in base pixels: at birth / when it bursts
+  const BOOM_SECONDS = 1.8;              // burst and re-forming of the strands
 
   const GLYPHS = {
     0: ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
@@ -145,13 +187,15 @@
 
   // ---- strands ------------------------------------------------------------
   // n round tubes of radius r whose centers sit at radius R from the axis and
-  // twist with height. Width w in [0, 1] sets both the overall size and how far
-  // apart neighbouring strands sit: skinny strands overlap into one grooved rope,
-  // fat strands pull apart until small gaps open between them.
+  // twist with height. Width w in [0, 1] (slim to broad) sets both the overall
+  // size and how far apart neighbouring strands sit: slim strands overlap into
+  // one grooved rope, broad strands pull apart until wide gaps open between them.
   const strands = {
-    twist: 2.4, ymax: 1.32,
+    twist: 2.4, ymax: ROWS * SCALE / 2 - 0.13,
+    wmin: 0.4, wmax: 1.8,                       // slider ends; wmax just fits the canvas
     c: new Float64Array(12),
     setup(n, w) {
+      w = this.wmin + w * (this.wmax - this.wmin);
       const outer = 0.32 + 0.5 * w;             // R + r: half-width of the bundle
       const spread = 0.55 + 0.8 * w;            // neighbour spacing / tube diameter
       const s = Math.sin(Math.PI / n);
@@ -195,7 +239,7 @@
   // ---- renderer -----------------------------------------------------------
   const LIGHT = (() => { const l = [-0.55, 0.55, 0.65]; const n = Math.hypot(...l); return l.map(v => v / n); })();
   const ASPECT = CW / CH;
-  const SCALE = 2.9 / ROWS;             // world units per row
+  const UNIT = SCALE / CH;              // world units per base pixel
 
   function shade(shape, x, y, z, ph) {
     const e = 0.004, f = (a, b, c) => shape.sdf(a, b, c, ph);
@@ -233,7 +277,97 @@
     flow: params.get('flow') !== '0',
   };
 
+  const stats = { t: 0, ph: 0, hits: 0, pulls: 0, bits: '' };   // last frame, for the readout
+
+  // ---- pointer effects ----------------------------------------------------
+  // Hovering scatters the digits away from the cursor. Pressing opens a black
+  // hole that swallows what is around it and grows, faster while it is dragged
+  // across the strands, until it bursts and the strands settle back into place.
+  // Positions are in base pixels. None of this runs unless the pointer is used,
+  // so exports and the idle loop are unchanged.
+  const fx = {
+    x: 0, y: 0, over: false, mouse: false, down: false, drag: 0,
+    hover: 0,            // 0..1 eased strength of the hover scatter
+    r: 0, eaten: 0,      // black hole radius, strand cells caught in its pull last frame
+    boom: -1, bx: 0, by: 0,   // burst progress 0..1 (-1 when idle) and its center
+    clock: 0,
+  };
+  function stepFx(dt) {
+    fx.clock += dt;
+    if (fx.boom >= 0) {
+      fx.boom += dt / BOOM_SECONDS;
+      if (fx.boom >= 1) fx.boom = -1;
+    } else if (fx.down) {
+      fx.r = Math.max(fx.r, HOLE_MIN) + dt * (14 + 0.1 * Math.min(fx.eaten, 500)) + fx.drag * 0.15;
+      if (fx.r >= HOLE_MAX) { fx.boom = 0; fx.bx = fx.x; fx.by = fx.y; fx.r = 0; fx.down = false; }
+    } else fx.r = Math.max(0, fx.r - dt * 240);
+    fx.drag = 0;
+    const want = fx.over && fx.mouse && !fx.down && fx.r === 0 && fx.boom < 0 ? 1 : 0;
+    fx.hover += (want - fx.hover) * Math.min(1, dt * 10);
+    if (!want && fx.hover < 0.01) fx.hover = 0;
+  }
+
+  // Decides what the cell centered on base pixel (qx, qy) shows:
+  //   0 the scene as usual      1 the scene sampled at (sx, sy) instead
+  //   2 nothing                 3 a glowing digit at palette level `glow`
+  let sx = 0, sy = 0, glow = 0;
+  function warp(qx, qy, col, row) {
+    if (fx.boom >= 0) {
+      const dx = qx - fx.bx, dy = qy - fx.by, d = Math.hypot(dx, dy) || 1;
+      const front = fx.boom * 2 * Math.hypot(W, H);       // shockwave crosses the canvas by half time
+      if (d < HOLE_MAX * (1 - fx.boom / 0.15)) { glow = 7; return 3; }
+      if (Math.abs(d - front) < 14) { glow = 7; return 3; }
+      if (d > front) return 0;
+      // behind the shockwave every cell shows a fragment thrown out from nearer
+      // the center; the throw shrinks to nothing, so the strands re-form
+      const a = Math.pow(1 - fx.boom, 3) * 300;
+      const out = a * (0.25 + 0.75 * hash2(col, row)), side = a * 0.6 * (hash2(col + 71, row + 13) - 0.5);
+      sx = qx - dx / d * out - dy / d * side;
+      sy = qy - dy / d * out + dx / d * side;
+      return 1;
+    }
+    const dx = qx - fx.x, dy = qy - fx.y, d = Math.hypot(dx, dy) || 1;
+    if (fx.r > 0) {
+      const r = fx.r, reach = 30 + 1.2 * r;
+      if (d < r) return 2;
+      const ang = Math.atan2(dy, dx);
+      if (d < r + 9) {
+        // flickering ring at the horizon with a bright spot circling it
+        if (hash2(col + Math.floor(fx.clock * 14), row) > 0.8) return 2;
+        glow = 5 + Math.round(1 + Math.cos(ang - fx.clock * 3));
+        return 3;
+      }
+      if (d >= r + reach) return 0;
+      const g = 1 - (d - r) / reach;                      // 1 at the horizon, 0 where the pull ends
+      // streaks of digits falling in along spokes
+      const lane = Math.floor((ang + Math.PI) / TAU * 40);
+      const p = Math.pow(1 - g, 5 / 3) * 3 + fx.clock * 1.5 + hash2(lane, 7);
+      if (p - Math.floor(p) < 0.2 && hash2(lane * 3 + 1, Math.floor(p)) < 0.45) {
+        glow = Math.min(6, 1 + Math.floor(g * 6));
+        return 3;
+      }
+      // everything else is dragged inward and wound around the hole
+      const ds = d + 0.9 * r * g * g, sw = 1.4 * g * g, cs = Math.cos(sw), sn = Math.sin(sw);
+      sx = fx.x + (dx * cs - dy * sn) / d * ds;
+      sy = fx.y + (dx * sn + dy * cs) / d * ds;
+      return 1;
+    }
+    if (fx.hover > 0 && d < HOVER_REACH) {
+      const k = fx.hover, r0 = 22 * k;
+      if (d < r0) return 2;
+      const g = 1 - (d - r0) / (HOVER_REACH - r0);        // 1 beside the cursor, 0 at the rim
+      if (hash2(col * 3 + 1, row * 5 + 2) < 0.55 * g * k) return 2;
+      // pushed outward, with a little scatter so the digits break apart
+      const push = r0 * g, jit = 10 * g * k;
+      sx = qx - dx / d * push + (hash2(col + 19, row) - 0.5) * jit;
+      sy = qy - dy / d * push + (hash2(col, row + 23) - 0.5) * jit;
+      return 1;
+    }
+    return 0;
+  }
+
   function render(t) {
+    let hits = 0, pulls = 0, bits = '';
     const shape = strands;
     shape.setup(state.strands, state.width);
     const palette = COLORS[state.color].ramp;
@@ -241,16 +375,32 @@
     // whole number of 2π/n symmetry turns per loop (about half a turn) -> seamless
     const ph = t * TAU * Math.round(state.strands / 2) / state.strands;
     const flow = state.flow ? t * FLOW_PERIOD : 0;   // one pattern period per loop -> seamless
+    const warped = fx.r > 0 || fx.hover > 0 || fx.boom >= 0;
+    const holeOn = fx.r > 0 && fx.boom < 0;
+    const tick = Math.floor(fx.clock * 14);
+    let eaten = 0;
     for (let row = 0; row < ROWS; row++) {
-      const y = (ROWS / 2 - row - 0.5) * SCALE;
-      const inside = Math.abs(y) <= shape.ymax;
-      const c = shape.centers(y, ph);
+      const y0 = (ROWS / 2 - row - 0.5) * SCALE;
+      const c = shape.centers(y0, ph);
+      let moved = false;                 // c currently holds some other height's centers
       for (let col = 0; col < COLS; col++) {
-        const x = (col + 0.5 - COLS / 2) * SCALE * ASPECT;
-        // orthographic ray along -z through the slice at this row's height
+        let x = (col + 0.5 - COLS / 2) * SCALE * ASPECT, y = y0;
+        let bc = col, br = row, code = 0;   // background cell this one samples
+        if (warped) {
+          code = warp(col * CW + CW / 2, row * CH + CH / 2, col, row);
+          if (code === 2) { putGlyph(col, row, 0, BG); continue; }
+          if (code === 3) { putGlyph(col, row, hash2(col + tick, row) < 0.5 ? 0 : 1, palette[glow]); continue; }
+          if (code === 1) {
+            x = (sx - W / 2) * UNIT; y = (H / 2 - sy) * UNIT;
+            bc = Math.floor(sx / CW); br = Math.floor(sy / CH);
+            shape.centers(y, ph); moved = true;
+          } else if (moved) { shape.centers(y0, ph); moved = false; }
+        }
+        const inside = Math.abs(y) <= shape.ymax;
+        // orthographic ray along -z through the slice at this cell's height
         let z = shape.extent, hit = false;
         if (inside && Math.abs(x) < shape.extent) {
-          for (let i = 0; i < 60 && z > -shape.extent; i++) {
+          for (let i = 0; i < 96 && z > -shape.extent; i++) {
             const d = shape.slice(x, z, c);
             if (d < 0.002) { hit = true; break; }
             z -= Math.max(d * 0.9, 0.003);
@@ -263,24 +413,70 @@
           const b = hash2(Math.floor(u), cell) < 0.5 ? 0 : 1;
           const level = 1 + Math.min(palette.length - 2, Math.floor(lum * (palette.length - 1)));
           putGlyph(col, row, b, palette[level]);
+          hits++;
+          if (code === 1 && holeOn) eaten++;
+          if (row === ROWS / 2 && bits.length < 16) bits += b;
         } else {
-          // faint static field of digits behind the shape
-          const r = hash2(col * 7 + 3, row * 13 + 1);
-          if (r < 0.22) putGlyph(col, row, r < 0.11 ? 0 : 1, palette[0]);
-          else putGlyph(col, row, 0, BG);
+          // a few background digits fall toward the nearest strand, stretching and
+          // brightening as they close in, like light pulled into a black hole
+          let pulled = false;
+          if (inside) {
+            let dx = Infinity;
+            for (let i = 0; i < shape.n; i++) dx = Math.min(dx, Math.abs(x - c[2 * i]) - shape.r);
+            const s = dx / (SCALE * ASPECT) / PULL_REACH;   // 0 at the strand's edge, 1 at full reach
+            if (s > 0 && s < 1) {
+              const lane = br * 2 + (x < 0 ? 0 : 1);
+              // s^(5/3) makes a digit speed up and smear across more cells near the edge
+              const p = Math.pow(s, 5 / 3) * PULL_SLOTS + t * PULL_RATE + hash2(lane, 91);
+              const id = Math.floor(p) % PULL_RATE;
+              if (p - Math.floor(p) < 0.18 && hash2(lane * 5 + 17, id * 13 + 3) < 0.22) {
+                const near = 1 - s;
+                const bit = hash2(lane + 5, id + 40) < 0.5 ? 0 : 1;
+                putGlyph(col, row, bit, palette[Math.min(4, Math.floor(near * near * 5))]);
+                pulled = true; pulls++;
+              }
+            }
+          }
+          if (!pulled) {
+            // faint static field of digits behind the shape
+            const r = hash2(bc * 7 + 3, br * 13 + 1);
+            if (r < 0.22) putGlyph(col, row, r < 0.11 ? 0 : 1, palette[0]);
+            else putGlyph(col, row, 0, BG);
+          }
         }
       }
     }
+    stats.t = t; stats.ph = ph; stats.hits = hits; stats.pulls = pulls; stats.bits = bits;
+    fx.eaten = eaten;
     ctx.putImageData(img, 0, 0);
   }
 
   // ---- loop ---------------------------------------------------------------
   let paused = false, start = performance.now(), pausedAt = 0;
   const phase = () => ((performance.now() - start) / 1000 / LOOP_SECONDS) % 1;
-  function frame() {
-    if (!paused) render(phase());
+  let last = performance.now();
+  function frame(now) {
+    const dt = clamp((now - last) / 1000, 0, 0.05); last = now;
+    if (!paused) { stepFx(dt); render(phase()); }
     requestAnimationFrame(frame);
   }
+  // pointer: hover scatters (mouse and pen only), press and drag feeds the black hole
+  function point(e) {
+    const b = canvas.getBoundingClientRect();
+    const x = (e.clientX - b.left) * W / b.width, y = (e.clientY - b.top) * H / b.height;
+    if (fx.down) fx.drag += Math.hypot(x - fx.x, y - fx.y);
+    fx.x = x; fx.y = y; fx.over = true; fx.mouse = e.pointerType !== 'touch';
+  }
+  const release = e => { fx.down = false; if (e.pointerType === 'touch') fx.over = false; };
+  canvas.addEventListener('pointermove', point);
+  canvas.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    point(e); fx.drag = 0;
+    if (fx.boom < 0) { fx.down = true; canvas.setPointerCapture(e.pointerId); }
+  });
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('pointerleave', () => { if (!fx.down) fx.over = false; });
   // space toggles pause
   addEventListener('keydown', e => {
     if (e.code !== 'Space' || e.target.closest('button, input')) return;
@@ -308,11 +504,9 @@
   widthIn.oninput = () => { state.width = +widthIn.value; sync(); };
 
   function sync() {
-    const { ramp, bg } = COLORS[state.color];
+    const { bg } = COLORS[state.color];
     const css = c => `rgb(${c[0]} ${c[1]} ${c[2]})`;
     const root = document.documentElement.style;
-    root.setProperty('--fg', css(ramp[5]));
-    root.setProperty('--dim', css(ramp[2]));
     root.setProperty('--bg', css(bg));
     for (const b of swatches.children) b.setAttribute('aria-pressed', b.dataset.color === state.color);
     strandsIn.value = state.strands; widthIn.value = state.width;
@@ -329,6 +523,37 @@
     if (paused) render(pausedAt);
   }
   sync();
+
+  // ---- readout ------------------------------------------------------------
+  // Types out what the render loop just did, one step per line, on repeat.
+  const TRACE = [
+    () => `> render(t=${stats.t.toFixed(3)})`,
+    () => `setup(n=${state.strands}, w=${state.width.toFixed(2)})`,
+    () => `  r=${strands.r.toFixed(3)} R=${strands.R.toFixed(3)}`,
+    () => `twist ph=${stats.ph.toFixed(3)} rad`,
+    () => `march ${COLS}x${ROWS} rays`,
+    () => `  hit ${stats.hits} cells`,
+    () => `flow ${stats.bits}`,
+    () => `pull ${stats.pulls} bits inward`,
+    () => `shade 7 levels ${state.color}`,
+    () => fx.boom >= 0 ? `hole burst, re-forming` : fx.r > 0 ? `hole r=${Math.round(fx.r)} eats ${fx.eaten}` : `hole idle`,
+    () => `putImageData ok`,
+    () => ``,
+  ];
+  const trace = $('trace'), log = [];
+  let step = 0, line = TRACE[0](), typed = 0;
+  function type() {
+    if (paused) return;
+    if (typed < line.length) typed++;
+    else {
+      log.push(line);
+      if (log.length > 80) log.shift();
+      step = (step + 1) % TRACE.length;
+      line = TRACE[step](); typed = 0;
+    }
+    trace.textContent = log.join('\n') + '\n' + line.slice(0, typed) + '█';
+  }
+  if (!params.has('manual') && !params.has('clean')) setInterval(type, 28);
 
   // Exposed for frame export (see export.mjs).
   window.binarySpiral = { render, state, LOOP_SECONDS, size: [W, H] };

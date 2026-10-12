@@ -5,7 +5,11 @@ Twisting strands drawn entirely with `0` and `1`. Each cell is a 5×7 pixel-font
 - `index.html`: the interactive page. The panel on the bottom left has:
   - **Color**: purple, red, yellow, orange, pink, blue
   - **Strands**: 2–6
-  - **Width**: skinny strands merge into one grooved rope; fat strands pull apart until gaps open between them
+  - **Width**: slim strands merge into one grooved rope; broad strands pull apart until wide gaps open between them
+
+  Hover the strands with a mouse and the digits scatter away from the cursor. Press and drag (or touch and drag on a phone) to open a black hole that swallows the digits around it and grows, faster while it is over the strands, until it bursts and the strands re-form. On a phone the page fits one screen: readout and controls on the left, strands on the right.
+
+  Above the panel, a boxed readout types out what the render loop is doing with live values from the current frame. The interface stays white whichever color is picked.
 
   The subtitle under the title names the current strand (e.g. *Two-strand orange*). Settings are kept in the URL (`?color=blue&strands=4&width=0.8`) so you can share a link. Add `?clean` to hide the panel. Space pauses the animation.
 - `out/*.gif`, `out/*.mp4`: pre-rendered loops (96 frames @ 24fps).
